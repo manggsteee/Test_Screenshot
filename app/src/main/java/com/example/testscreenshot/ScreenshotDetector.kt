@@ -1,101 +1,76 @@
 package com.example.testscreenshot
 
+import android.app.Activity
+import android.database.ContentObserver
+import android.net.Uri
 import android.os.Build
-import android.os.Environment
-import android.os.FileObserver
-import android.util.Log
-import java.io.File
+import android.os.Handler
+import android.os.Looper
+import android.provider.MediaStore
 
 /**
- * Detect screenshot bằng FileObserver (inotify) — không cần xin quyền.
+ * Detect screenshot cho toàn app.
  *
- * Nguyên lý:
- * - FileObserver sử dụng Linux inotify API để giám sát sự kiện file system.
- * - Khi user chụp screenshot, OS ghi file vào thư mục Screenshots.
- * - FileObserver nhận event CLOSE_WRITE (file đã ghi xong) → ta biết có screenshot mới.
- * - Không cần READ_EXTERNAL_STORAGE vì FileObserver chỉ nhận event + tên file,
- *   không đọc nội dung file.
+ * - Android 14+ (API 34): dùng ScreenCaptureCallback (API chính thức)
+ * - Android 13 trở xuống: dùng ContentObserver trên MediaStore.Images
+ *   → KHÔNG cần quyền READ_EXTERNAL_STORAGE hay READ_MEDIA_IMAGES
+ *   → Chỉ lắng nghe sự kiện onChange, KHÔNG query content
+ *   → Bất kỳ ảnh mới nào được thêm vào MediaStore khi app đang foreground
+ *     đều coi là screenshot (false positive rất thấp trong thực tế)
  *
- * Dùng cho Android 12 (API 32) trở xuống.
- * Android 13+ nên dùng ScreenCaptureCallback hoặc Activity#registerScreenCaptureCallback.
+ * Debounce 1 giây để tránh trigger nhiều lần cho 1 screenshot
+ * (MediaStore có thể fire onChange nhiều lần: thumbnail + full image)
  */
-class ScreenshotDetector(
-    private val onScreenshotDetected: (path: String) -> Unit
-) {
-    companion object {
-        private const val TAG = "ScreenshotDetector"
-    }
+class ScreenshotDetector(private val activity: Activity) {
 
-    private val observers = mutableListOf<FileObserver>()
+    private var callback: Any? = null       // Android 14+
+    private var observer: ContentObserver? = null  // Android 13-
 
-    /**
-     * Các thư mục screenshot phổ biến trên các dòng máy Android.
-     * - Samsung, Pixel, AOSP: Pictures/Screenshots
-     * - Một số OEM: DCIM/Screenshots
-     * - Xiaomi: DCIM/Screenshots hoặc Pictures/Screenshots
-     */
-    private fun getScreenshotDirectories(): List<File> {
-        val externalStorage = Environment.getExternalStorageDirectory()
-        return listOf(
-            File(externalStorage, "Pictures/Screenshots"),
-            File(externalStorage, "DCIM/Screenshots"),
-            File(externalStorage, "Screenshots"),
-        ).filter { it.exists() || it.mkdirs().not().also { /* thư mục không tồn tại, bỏ qua */ } }
-         .filter { it.exists() && it.isDirectory }
-    }
+    private var lastDetectedTime = 0L
+    private val debounceDuration = 1000L // 1 giây
 
-    fun startDetecting() {
-        stopDetecting()
-
-        val dirs = getScreenshotDirectories()
-        if (dirs.isEmpty()) {
-            Log.w(TAG, "Không tìm thấy thư mục screenshot nào để giám sát")
-            return
-        }
-
-        for (dir in dirs) {
-            Log.d(TAG, "Bắt đầu giám sát: ${dir.absolutePath}")
-
-            val observer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // Android 10+ : dùng constructor nhận File
-                object : FileObserver(dir, CLOSE_WRITE) {
-                    override fun onEvent(event: Int, path: String?) {
-                        handleEvent(dir, path)
-                    }
-                }
-            } else {
-                // Android 9 trở xuống: dùng constructor nhận String (deprecated nhưng cần thiết)
-                @Suppress("DEPRECATION")
-                object : FileObserver(dir.absolutePath, CLOSE_WRITE) {
-                    override fun onEvent(event: Int, path: String?) {
-                        handleEvent(dir, path)
-                    }
-                }
+    fun register(onDetected: () -> Unit) {
+        when {
+            // Android 14+: ScreenCaptureCallback
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> {
+                val screenCaptureCallback = Activity.ScreenCaptureCallback { onDetected() }
+                activity.registerScreenCaptureCallback(activity.mainExecutor, screenCaptureCallback)
+                callback = screenCaptureCallback
             }
 
-            observer.startWatching()
-            observers.add(observer)
+            // Android 13 trở xuống: ContentObserver — KHÔNG cần quyền
+            else -> {
+                observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+                    override fun onChange(selfChange: Boolean, uri: Uri?) {
+                        super.onChange(selfChange, uri)
+
+                        // Debounce: tránh trigger nhiều lần cho 1 screenshot
+                        val now = System.currentTimeMillis()
+                        if (now - lastDetectedTime < debounceDuration) return
+                        lastDetectedTime = now
+
+                        onDetected()
+                    }
+                }
+                activity.contentResolver.registerContentObserver(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    true,
+                    observer!!
+                )
+            }
         }
     }
 
-    fun stopDetecting() {
-        observers.forEach { it.stopWatching() }
-        observers.clear()
-    }
-
-    private fun handleEvent(dir: File, path: String?) {
-        if (path == null) return
-
-        // Chỉ quan tâm file ảnh
-        val lowerPath = path.lowercase()
-        if (!lowerPath.endsWith(".png") &&
-            !lowerPath.endsWith(".jpg") &&
-            !lowerPath.endsWith(".jpeg") &&
-            !lowerPath.endsWith(".webp")
-        ) return
-
-        val fullPath = File(dir, path).absolutePath
-        Log.d(TAG, "Screenshot detected: $fullPath")
-        onScreenshotDetected(fullPath)
+    fun unregister() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            (callback as? Activity.ScreenCaptureCallback)?.let {
+                activity.unregisterScreenCaptureCallback(it)
+            }
+        }
+        observer?.let {
+            activity.contentResolver.unregisterContentObserver(it)
+        }
+        observer = null
+        callback = null
     }
 }

@@ -1,8 +1,7 @@
 package com.example.testscreenshot
 
-import android.os.Build
+import android.annotation.SuppressLint
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -23,16 +22,13 @@ import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffo
 import androidx.compose.material3.rememberBottomSheetScaffoldState
 import androidx.compose.material3.rememberStandardBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
@@ -42,25 +38,43 @@ import com.example.testscreenshot.ui.theme.TestScreenshotTheme
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
-    private var screenshotDetector: ScreenshotDetector? = null
+    private val screenshotDetector by lazy { ScreenshotDetector(this) }
+
+    // State để Compose observe, trigger show bottom sheet
+    val screenshotDetected = mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             TestScreenshotTheme {
-                TestScreenshotApp()
+                TestScreenshotApp(screenshotDetected = screenshotDetected)
             }
         }
     }
+
+    override fun onStart() {
+        super.onStart()
+        screenshotDetector.register {
+            screenshotDetected.value = true
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        screenshotDetector.unregister()
+    }
 }
 
+@SuppressLint("CoroutineCreationDuringComposition")
 @OptIn(ExperimentalMaterial3Api::class)
 @PreviewScreenSizes
 @Composable
-fun TestScreenshotApp() {
+fun TestScreenshotApp(
+    screenshotDetected: androidx.compose.runtime.MutableState<Boolean> =
+        mutableStateOf(false)
+) {
     var currentDestination by rememberSaveable { mutableStateOf(AppDestinations.HOME) }
-    var screenshotPath by remember { mutableStateOf<String?>(null) }
 
     val sheetState = rememberStandardBottomSheetState(
         initialValue = SheetValue.Hidden,
@@ -68,24 +82,11 @@ fun TestScreenshotApp() {
     )
     val scaffoldState = rememberBottomSheetScaffoldState(bottomSheetState = sheetState)
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
 
-    // Chỉ dùng FileObserver cho Android 12 trở xuống
-    // Android 13+ bạn đã xử lí bằng ScreenCaptureCallback
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-        DisposableEffect(Unit) {
-            val detector = ScreenshotDetector { path ->
-                screenshotPath = path
-                scope.launch {
-                    sheetState.expand()
-                }
-            }
-            detector.startDetecting()
-
-            onDispose {
-                detector.stopDetecting()
-            }
-        }
+    // Khi detect screenshot → expand bottom sheet
+    if (screenshotDetected.value) {
+        screenshotDetected.value = false
+        scope.launch { sheetState.expand() }
     }
 
     BottomSheetScaffold(
@@ -93,7 +94,6 @@ fun TestScreenshotApp() {
         sheetPeekHeight = 0.dp,
         sheetContent = {
             ScreenshotBottomSheetContent(
-                screenshotPath = screenshotPath,
                 onDismiss = {
                     scope.launch { sheetState.hide() }
                 }
@@ -129,7 +129,6 @@ fun TestScreenshotApp() {
 
 @Composable
 fun ScreenshotBottomSheetContent(
-    screenshotPath: String?,
     onDismiss: () -> Unit
 ) {
     Column(
@@ -144,7 +143,7 @@ fun ScreenshotBottomSheetContent(
         )
         Spacer(modifier = Modifier.height(12.dp))
         Text(
-            text = screenshotPath ?: "",
+            text = "Bạn vừa chụp ảnh màn hình",
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
