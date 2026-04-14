@@ -4,73 +4,112 @@ import android.app.Activity
 import android.database.ContentObserver
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.os.FileObserver
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import android.util.Log
+import java.io.File
 
-/**
- * Detect screenshot cho toàn app.
- *
- * - Android 14+ (API 34): dùng ScreenCaptureCallback (API chính thức)
- * - Android 13 trở xuống: dùng ContentObserver trên MediaStore.Images
- *   → KHÔNG cần quyền READ_EXTERNAL_STORAGE hay READ_MEDIA_IMAGES
- *   → Chỉ lắng nghe sự kiện onChange, KHÔNG query content
- *   → Bất kỳ ảnh mới nào được thêm vào MediaStore khi app đang foreground
- *     đều coi là screenshot (false positive rất thấp trong thực tế)
- *
- * Debounce 1 giây để tránh trigger nhiều lần cho 1 screenshot
- * (MediaStore có thể fire onChange nhiều lần: thumbnail + full image)
- */
 class ScreenshotDetector(private val activity: Activity) {
 
-    private var callback: Any? = null       // Android 14+
-    private var observer: ContentObserver? = null  // Android 13-
+    private var callback: Any? = null // Android 14+
+    private var contentObserver: ContentObserver? = null // Dự phòng cho Android 13-
+    private val fileObservers = mutableListOf<FileObserver>() // Chính cho Android 13-
 
     private var lastDetectedTime = 0L
-    private val debounceDuration = 1000L // 1 giây
+    private val debounceDuration = 1000L
 
     fun register(onDetected: () -> Unit) {
-        when {
-            // Android 14+: ScreenCaptureCallback
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> {
-                val screenCaptureCallback = Activity.ScreenCaptureCallback { onDetected() }
-                activity.registerScreenCaptureCallback(activity.mainExecutor, screenCaptureCallback)
-                callback = screenCaptureCallback
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            // Android 14+: API chính thức, không bao giờ nhận nhầm ảnh download
+            val screenCaptureCallback = Activity.ScreenCaptureCallback {
+                onDetected()
             }
+            activity.registerScreenCaptureCallback(activity.mainExecutor, screenCaptureCallback)
+            callback = screenCaptureCallback
+        } else {
+            // Android 13 trở xuống: Kết hợp FileObserver và ContentObserver
+            setupFileObservers(onDetected)
+            setupContentObserver(onDetected)
+        }
+    }
 
-            // Android 13 trở xuống: ContentObserver — KHÔNG cần quyền
-            else -> {
-                observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
-                    override fun onChange(selfChange: Boolean, uri: Uri?) {
-                        super.onChange(selfChange, uri)
+    private fun setupFileObservers(onDetected: () -> Unit) {
+        val screenshotDirs = listOf(
+            File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "Screenshots"),
+            File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "Screenshots")
+        )
 
-                        // Debounce: tránh trigger nhiều lần cho 1 screenshot
-                        val now = System.currentTimeMillis()
-                        if (now - lastDetectedTime < debounceDuration) return
-                        lastDetectedTime = now
-
-                        onDetected()
+        for (dir in screenshotDirs) {
+            if (!dir.exists()) dir.mkdirs()
+            if (dir.exists()) {
+                val observer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    object : FileObserver(dir, CLOSE_WRITE) {
+                        override fun onEvent(event: Int, path: String?) {
+                            triggerDetection(onDetected)
+                        }
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    object : FileObserver(dir.absolutePath, CLOSE_WRITE) {
+                        override fun onEvent(event: Int, path: String?) {
+                            triggerDetection(onDetected)
+                        }
                     }
                 }
-                activity.contentResolver.registerContentObserver(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                    true,
-                    observer!!
-                )
+                observer.startWatching()
+                fileObservers.add(observer)
             }
         }
     }
 
+    private fun setupContentObserver(onDetected: () -> Unit) {
+        contentObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean, uri: Uri?) {
+                val uriString = uri?.toString()?.lowercase() ?: ""
+                
+                // ContentObserver trên MediaStore rất dễ bị trigger bởi ảnh download.
+                // Ta chỉ lọc những URI có khả năng là screenshot (một số OEM có nhúng "screenshot" vào URI)
+                // Hoặc nếu FileObserver đã chạy thì nó sẽ là nguồn tin cậy hơn.
+                if (uriString.contains("screenshot")) {
+                    triggerDetection(onDetected)
+                }
+            }
+        }
+        activity.contentResolver.registerContentObserver(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            true,
+            contentObserver!!
+        )
+    }
+
+    private fun triggerDetection(onDetected: () -> Unit) {
+        val now = System.currentTimeMillis()
+        if (now - lastDetectedTime < debounceDuration) return
+        lastDetectedTime = now
+
+        activity.runOnUiThread {
+            onDetected()
+        }
+    }
+
     fun unregister() {
+        // Android 14+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             (callback as? Activity.ScreenCaptureCallback)?.let {
                 activity.unregisterScreenCaptureCallback(it)
             }
         }
-        observer?.let {
+        
+        // Android 13-
+        fileObservers.forEach { it.stopWatching() }
+        fileObservers.clear()
+        
+        contentObserver?.let {
             activity.contentResolver.unregisterContentObserver(it)
         }
-        observer = null
-        callback = null
+        contentObserver = null
     }
 }

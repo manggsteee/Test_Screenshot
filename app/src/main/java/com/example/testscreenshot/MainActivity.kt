@@ -1,6 +1,6 @@
 package com.example.testscreenshot
 
-import android.annotation.SuppressLint
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -22,6 +22,7 @@ import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffo
 import androidx.compose.material3.rememberBottomSheetScaffoldState
 import androidx.compose.material3.rememberStandardBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
@@ -29,6 +30,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
@@ -66,7 +68,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@SuppressLint("CoroutineCreationDuringComposition")
 @OptIn(ExperimentalMaterial3Api::class)
 @PreviewScreenSizes
 @Composable
@@ -82,11 +83,14 @@ fun TestScreenshotApp(
     )
     val scaffoldState = rememberBottomSheetScaffoldState(bottomSheetState = sheetState)
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     // Khi detect screenshot → expand bottom sheet
-    if (screenshotDetected.value) {
-        screenshotDetected.value = false
-        scope.launch { sheetState.expand() }
+    LaunchedEffect(screenshotDetected.value) {
+        if (screenshotDetected.value) {
+            screenshotDetected.value = false
+            sheetState.expand()
+        }
     }
 
     BottomSheetScaffold(
@@ -118,10 +122,22 @@ fun TestScreenshotApp(
             }
         ) {
             Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                Greeting(
-                    name = "Android",
-                    modifier = Modifier.padding(innerPadding)
-                )
+                Column(modifier = Modifier.padding(innerPadding)) {
+                    Greeting(name = "Android")
+                    androidx.compose.material3.Button(
+                        onClick = {
+                            // Giả lập logic tắt bottomSheet trước khi đi qua WebView
+                            scope.launch {
+                                sheetState.hide()
+                                val intent = Intent(context, WebViewActivity::class.java)
+                                context.startActivity(intent)
+                            }
+                        },
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        Text("Mở WebView")
+                    }
+                }
             }
         }
     }
